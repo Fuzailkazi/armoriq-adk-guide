@@ -101,4 +101,4 @@ verify all three outcomes with your own eyes.
 
 ---
 
-Back to the **[guide index](./README.md)**
+Back to the **[guide index](../README.md)**
