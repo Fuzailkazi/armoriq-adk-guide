@@ -42,7 +42,7 @@ Your agent's tools come from an MCP server, and the ArmorIQ platform needs that
 server's public URL. So build and deploy it before you wire up policy.
 
 See [chapter 3](./03-designing-tools.md) for how to design the tools, and
-[`armoriq-adk-ops-mcp`](https://github.com/armoriq/armoriq-adk-ops-mcp) for a working one.
+[`armoriq-adk-ops-mcp`](https://github.com/Fuzailkazi/armoriq-adk-ops-mcp) for a working one.
 
 It has to be reachable at a **public HTTPS URL**. The platform calls it directly,
 so `localhost` will not work once you are running against the real thing.
@@ -115,7 +115,7 @@ console.log('mcps:  ', (account.mcps ?? []).map((m: any) => m.name));
 against a live account. Compare what it prints against your environment
 variables. If either name is missing from those lists, stop and fix that first.
 
-[`armoriq-adk-ops-agent`](https://github.com/armoriq/armoriq-adk-ops-agent) ships this as
+[`armoriq-adk-ops-agent`](https://github.com/Fuzailkazi/armoriq-adk-ops-agent) ships this as
 `npm run check`, and it reports the mismatch in plain English.
 
 ## First run
