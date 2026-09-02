@@ -74,23 +74,12 @@ npm install
 
 It's an ordinary Express app with a `render.yaml` and a `Dockerfile`. Deploy it — ArmorIQ needs to reach it directly, so it has to be at a **public HTTPS URL**; `localhost` won't work once you're running against the real platform.
 
-**Render (no CLI needed):**
-
-1. Go to [dashboard.render.com](https://dashboard.render.com) → **New → Blueprint**.
-2. Connect your GitHub account if you haven't, then pick the repo you cloned above.
-3. Render reads `render.yaml` and fills in the form for you:
-   - **Blueprint Name** — any label, just for your own reference in the dashboard. It does not affect the deployed service's name or URL.
-   - **Branch** — `main`.
-   - **Blueprint Path** — leave as `render.yaml` (it's at the repo root).
-4. Click through and **Apply**. First deploy takes a couple of minutes.
-
-**Or, Cloud Run:**
-
 ```bash
+# Render: New > Blueprint, point it at the repo. Or:
 gcloud run deploy ops-mcp --source . --region us-central1 --allow-unauthenticated
 ```
 
-Note the URL it gives you — on Render, that's on the service's overview page, right under its name (something like `https://ops-mcp-xxxx.onrender.com`), **not** the `exs-...` / `srv-...` resource ID shown elsewhere in the dashboard. **The MCP endpoint is that URL with `/mcp` on the end**, for example `https://ops-mcp-xxxx.onrender.com/mcp`.
+Note the URL it gives you. **The MCP endpoint is that URL with `/mcp` on the end**, for example `https://ops-mcp.onrender.com/mcp`.
 
 Confirm it's serving tools before you go further:
 
