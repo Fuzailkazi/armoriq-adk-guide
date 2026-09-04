@@ -32,6 +32,41 @@ That last step above is the interesting one. The ticket contains a prompt inject
 
 > **📸 Screenshot placeholder:** final terminal output of a complete run, showing ALLOWED, HELD and BLOCKED in sequence.
 
+## The four ideas you need
+
+Every step below uses these four words. Knowing them up front makes the rest of the guide easier to follow.
+
+| Word | What it means |
+|---|---|
+| **Plan** | The list of tool calls the model decided to make, captured right after it decides — before any of them run. |
+| **Intent token** | A cryptographic receipt of that plan. Signed once, then checked before every tool call to prove the call was actually part of it. |
+| **Scope** | One run, for one user. Created with `armoriq.forUser(userEmail, ...)`. Policy is looked up per user, so the same tool call can be allowed for one person and held for another. |
+| **Invoke** | The moment a tool actually runs. This is where enforcement happens — ArmorIQ checks the call against the plan and the policy *before* the tool executes, not after. |
+
+How they fit together:
+
+```
+ agent decides on tool calls
+          │
+          ▼
+   plan captured, signed  ───►  intent token
+          │
+          ▼
+   agent tries to invoke a tool
+          │
+          ▼
+   ArmorIQ checks: is this call in the plan? does policy allow it?
+          │
+   ┌──────┼──────┐
+   ▼      ▼      ▼
+ ALLOW   HOLD   BLOCK
+ (runs) (waits  (never
+         for a   runs)
+         human)
+```
+
+The important part: this check happens *outside* the model, in your code, before the tool runs. A prompt injection can persuade the model to want something — it can never make ArmorIQ allow it.
+
 ## Before you start
 
 You'll need:
@@ -218,7 +253,22 @@ Create the file structure:
 
 ```bash
 mkdir src
-touch .env src/config.ts src/ask.ts src/index.ts src/check-setup.ts
+touch .env src/config.ts src/error-message.ts src/ask.ts src/index.ts src/check-setup.ts
+```
+
+`error-message.ts` is one small helper, used everywhere you catch an error:
+
+```typescript
+// src/error-message.ts
+//
+// A `catch` block in TypeScript receives `unknown`, not `Error` — the thrown
+// value could be anything. This is the one place that decides how to read it.
+export function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
 ```
 
 ## Step 8: Configure environment variables
@@ -260,6 +310,28 @@ function required(name: string): string {
   return value;
 }
 
+/**
+ * Where the MCP server is running.
+ *
+ * The MCP server is a separate repo and a separate deployment, so set MCP_URL
+ * to its public URL with /mcp on the end:
+ *
+ *   MCP_URL=https://ops-mcp.onrender.com/mcp
+ *
+ * MCP_HOST is a convenience: if you happen to run both services in the same
+ * Render workspace you can point it at the MCP service and we build the URL
+ * from it. MCP_URL always wins.
+ */
+function resolveMcpUrl(): string {
+  if (process.env.MCP_URL) {
+    return process.env.MCP_URL;
+  }
+  if (process.env.MCP_HOST) {
+    return `https://${process.env.MCP_HOST}/mcp`;
+  }
+  return 'http://localhost:8788/mcp';
+}
+
 export const config = {
   /** Your ArmorIQ API key. Starts with ak_live_ or ak_test_. */
   armoriqApiKey: required('ARMORIQ_API_KEY'),
@@ -270,21 +342,7 @@ export const config = {
   /** The MCP name you registered on platform.armoriq.ai. Must match exactly. */
   mcpName: process.env.ARMORIQ_MCP_NAME ?? 'ops-mcp',
 
-  /**
-   * Where the MCP server is running.
-   *
-   * The MCP server is a separate repo and a separate deployment, so set MCP_URL
-   * to its public URL with /mcp on the end:
-   *
-   *   MCP_URL=https://ops-mcp.onrender.com/mcp
-   *
-   * MCP_HOST is a convenience: if you happen to run both services in the same
-   * Render workspace you can point it at the MCP service and we build the URL
-   * from it. MCP_URL always wins.
-   */
-  mcpUrl:
-    process.env.MCP_URL ??
-    (process.env.MCP_HOST ? `https://${process.env.MCP_HOST}/mcp` : 'http://localhost:8788/mcp'),
+  mcpUrl: resolveMcpUrl(),
 
   /** Which Gemini model to use. */
   model: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
@@ -316,6 +374,31 @@ Two mistakes — a wrong agent name and a wrong MCP name — produce identical, 
 // it is safe to run against a real account.
 import { ArmorIQClient } from '@armoriq/sdk';
 import { config } from './config.js';
+import { errorMessage } from './error-message.js';
+
+type NamedEntry = { name?: string };
+
+/** Turns [{name:"a"},{name:"b"}] into ["a","b"]. Unnamed entries become "?". */
+function namesOf(entries: NamedEntry[] | undefined): string[] {
+  if (!entries) {
+    return [];
+  }
+  const names: string[] = [];
+  for (const entry of entries) {
+    names.push(entry.name ?? '?');
+  }
+  return names;
+}
+
+/** Pulls the tool list out of the MCP server's response text. */
+function parseToolsList(text: string): Array<{ name: string }> {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) {
+    return [];
+  }
+  const parsed = JSON.parse(match[0]);
+  return parsed.result?.tools ?? [];
+}
 
 async function main() {
   console.log('Checking your setup...\n');
@@ -328,13 +411,12 @@ async function main() {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
     });
     const text = await response.text();
-    const match = text.match(/\{[\s\S]*\}/);
-    const tools = match ? JSON.parse(match[0]).result?.tools ?? [] : [];
+    const tools = parseToolsList(text);
     console.log(`MCP server:  OK — ${tools.length} tools at ${config.mcpUrl}`);
     for (const tool of tools) console.log(`               ${tool.name}`);
   } catch (error: unknown) {
     console.log(`MCP server:  FAILED — cannot reach ${config.mcpUrl}`);
-    console.log(`               ${error instanceof Error ? error.message : String(error)}`);
+    console.log(`               ${errorMessage(error)}`);
     console.log('               Is the MCP server running? cd ../armoriq-adk-ops-mcp && npm start');
   }
   console.log();
@@ -349,9 +431,8 @@ async function main() {
 
   try {
     const account = await client.bootstrap();
-
-    const agentNames: string[] = (account.agents ?? []).map((a: { name?: string }) => a.name ?? '?');
-    const mcpNames: string[] = (account.mcps ?? []).map((m: { name?: string }) => m.name ?? '?');
+    const agentNames = namesOf(account.agents);
+    const mcpNames = namesOf(account.mcps);
 
     console.log(`ArmorIQ:     OK — org "${account.org?.name ?? 'unknown'}"`);
     console.log(`Agents:      ${agentNames.length ? agentNames.join(', ') : 'none registered'}`);
@@ -359,20 +440,21 @@ async function main() {
     console.log();
 
     // The two mismatches that cause "my policies aren't firing".
-    console.log(
-      agentNames.includes(config.agentName)
-        ? `Agent name:  OK — "${config.agentName}" is registered`
-        : `Agent name:  MISMATCH — .env says "${config.agentName}", which is not registered.\n` +
-          `               Register it, or change ARMORIQ_AGENT_NAME to one of the above.`,
-    );
-    console.log(
-      mcpNames.includes(config.mcpName)
-        ? `MCP name:    OK — "${config.mcpName}" is registered`
-        : `MCP name:    MISMATCH — .env says "${config.mcpName}", which is not registered.\n` +
-          `               Register it, or change ARMORIQ_MCP_NAME to one of the above.`,
-    );
+    if (agentNames.includes(config.agentName)) {
+      console.log(`Agent name:  OK — "${config.agentName}" is registered`);
+    } else {
+      console.log(`Agent name:  MISMATCH — .env says "${config.agentName}", which is not registered.`);
+      console.log('               Register it, or change ARMORIQ_AGENT_NAME to one of the above.');
+    }
+
+    if (mcpNames.includes(config.mcpName)) {
+      console.log(`MCP name:    OK — "${config.mcpName}" is registered`);
+    } else {
+      console.log(`MCP name:    MISMATCH — .env says "${config.mcpName}", which is not registered.`);
+      console.log('               Register it, or change ARMORIQ_MCP_NAME to one of the above.');
+    }
   } catch (error: unknown) {
-    console.log(`ArmorIQ:     FAILED — ${error instanceof Error ? error.message : String(error)}`);
+    console.log(`ArmorIQ:     FAILED — ${errorMessage(error)}`);
     console.log('               Check ARMORIQ_API_KEY in .env.');
   }
 
@@ -381,7 +463,7 @@ async function main() {
 }
 
 main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exit(1);
 });
 ```
@@ -463,7 +545,7 @@ Here is the entire integration. One import, and one block between building the a
 
 ```typescript
 // src/ask.ts — add this import at the top
-import { ArmorIQADK } from '@armoriq/sdk/dist/integrations/google_adk';
+import { ArmorIQADK, ArmorIQADKBundle } from '@armoriq/sdk/dist/integrations/google_adk';
 ```
 
 Give `ask` a return type, since it now reports what happened:
@@ -481,39 +563,49 @@ export async function ask(question: string, userEmail: string): Promise<AskResul
   // ── Step 3: wrap the run in ArmorIQ ───────────────────────────────────────
   const blocked: string[] = [];
 
-  const armoriq = config.disableArmoriq
-    ? undefined
-    : new ArmorIQADK({
-        apiKey: config.armoriqApiKey,
-        agentName: config.agentName,
-        defaultMcpName: config.mcpName,
-        approvalWaitSeconds: config.approvalWaitSeconds,
-      });
+  // If ArmorIQ is disabled, `armoriq` stays undefined and nothing below runs.
+  let armoriq: ArmorIQADK | undefined;
+  if (!config.disableArmoriq) {
+    armoriq = new ArmorIQADK({
+      apiKey: config.armoriqApiKey,
+      agentName: config.agentName,
+      defaultMcpName: config.mcpName,
+      approvalWaitSeconds: config.approvalWaitSeconds,
+    });
+  }
 
-  // `forUser` binds this run to one person, so policy is applied per user.
-  const scope = await armoriq?.forUser(userEmail, {
-    goal: question,
-    // Optional. ArmorIQ calls this as it makes decisions, so an app can show
-    // "waiting for approval" instead of appearing frozen.
-    onEvent: (kind, payload) => {
-      const tool = String(payload.tool ?? '');
-      if (kind === 'hold') {
-        console.log(`HOLD     ${tool} — waiting for a human to approve`);
-        console.log(`         reason: ${payload.reason}`);
-      } else if (kind === 'approved') {
-        console.log(`APPROVED ${tool} — carrying on`);
-      } else if (kind === 'block') {
-        blocked.push(tool);
-        console.log(`BLOCKED  ${tool}`);
-        console.log(`         reason: ${payload.reason}`);
-      } else if (kind === 'timeout' || kind === 'rejected') {
-        blocked.push(tool);
-        console.log(`REFUSED  ${tool} — approval ${kind}`);
-      }
-    },
-  });
+  // `scope` is only set when ArmorIQ is enabled. Everything below that uses
+  // it is guarded by `if (scope)`.
+  let scope: ArmorIQADKBundle | undefined;
 
-  scope?.install(agent);
+  if (armoriq) {
+    // `forUser` binds this run to one person, so policy is applied per user.
+    scope = await armoriq.forUser(userEmail, {
+      goal: question,
+      // Optional. ArmorIQ calls this as it makes decisions, so an app can show
+      // "waiting for approval" instead of appearing frozen.
+      onEvent: (kind, payload) => {
+        const tool = String(payload.tool ?? '');
+        if (kind === 'hold') {
+          console.log(`HOLD     ${tool} — waiting for a human to approve`);
+          console.log(`         reason: ${payload.reason}`);
+        } else if (kind === 'approved') {
+          console.log(`APPROVED ${tool} — carrying on`);
+        } else if (kind === 'block') {
+          blocked.push(tool);
+          console.log(`BLOCKED  ${tool}`);
+          console.log(`         reason: ${payload.reason}`);
+        } else if (kind === 'timeout' || kind === 'rejected') {
+          blocked.push(tool);
+          console.log(`REFUSED  ${tool} — approval ${kind}`);
+        }
+      },
+    });
+
+    scope.install(agent);
+  } else {
+    console.log('ArmorIQ is NOT installed. Nothing will be checked.\n');
+  }
 
   // ── Step 4: run it ────────────────────────────────────────────────────────
   let answer = '';
@@ -541,15 +633,19 @@ export async function ask(question: string, userEmail: string): Promise<AskResul
       }
 
       if (isFinalResponse(event)) {
-        const parts = event.content?.parts ?? [];
-        const text = parts.map((p) => p.text ?? '').join('');
+        let text = '';
+        if (event.content?.parts) {
+          text = event.content.parts.map((p) => p.text ?? '').join('');
+        }
         if (text.trim()) answer = text.trim();
       }
     }
   } finally {
     // Always clean up, even if the run failed.
-    scope?.uninstall(agent);
-    await scope?.close();
+    if (scope) {
+      scope.uninstall(agent);
+      await scope.close();
+    }
     await toolset.close();
   }
 
@@ -577,6 +673,7 @@ Finally, a small entry point:
 // src/index.ts
 import { ask } from './ask.js';
 import { config } from './config.js';
+import { errorMessage } from './error-message.js';
 
 const DEFAULT_QUESTION =
   'Ticket TKT-4471: acme@corp.com says they were double charged in March. ' +
@@ -604,7 +701,7 @@ async function main() {
 }
 
 main().catch((error: unknown) => {
-  console.error(`\nFailed: ${error instanceof Error ? error.message : String(error)}\n`);
+  console.error(`\nFailed: ${errorMessage(error)}\n`);
   process.exit(1);
 });
 ```
@@ -780,7 +877,7 @@ import {
   getFunctionResponses,
   isFinalResponse,
 } from '@google/adk';
-import { ArmorIQADK } from '@armoriq/sdk/dist/integrations/google_adk';
+import { ArmorIQADK, ArmorIQADKBundle } from '@armoriq/sdk/dist/integrations/google_adk';
 
 import { config } from './config.js';
 
@@ -841,41 +938,47 @@ export async function ask(question: string, userEmail: string): Promise<AskResul
   // ── Step 3: wrap the run in ArmorIQ ───────────────────────────────────────
   const blocked: string[] = [];
 
-  const armoriq = config.disableArmoriq
-    ? undefined
-    : new ArmorIQADK({
-        apiKey: config.armoriqApiKey,
-        agentName: config.agentName,
-        defaultMcpName: config.mcpName,
-        approvalWaitSeconds: config.approvalWaitSeconds,
-      });
+  // If ArmorIQ is disabled, `armoriq` stays undefined and nothing below runs.
+  let armoriq: ArmorIQADK | undefined;
+  if (!config.disableArmoriq) {
+    armoriq = new ArmorIQADK({
+      apiKey: config.armoriqApiKey,
+      agentName: config.agentName,
+      defaultMcpName: config.mcpName,
+      approvalWaitSeconds: config.approvalWaitSeconds,
+    });
+  }
 
-  // `forUser` binds this run to one person, so policy is applied per user.
-  const scope = await armoriq?.forUser(userEmail, {
-    goal: question,
-    // Optional. ArmorIQ calls this as it makes decisions, so an app can show
-    // "waiting for approval" instead of appearing frozen.
-    onEvent: (kind, payload) => {
-      const tool = String(payload.tool ?? '');
-      if (kind === 'hold') {
-        console.log(`HOLD     ${tool} — waiting for a human to approve`);
-        console.log(`         reason: ${payload.reason}`);
-      } else if (kind === 'approved') {
-        console.log(`APPROVED ${tool} — carrying on`);
-      } else if (kind === 'block') {
-        blocked.push(tool);
-        console.log(`BLOCKED  ${tool}`);
-        console.log(`         reason: ${payload.reason}`);
-      } else if (kind === 'timeout' || kind === 'rejected') {
-        blocked.push(tool);
-        console.log(`REFUSED  ${tool} — approval ${kind}`);
-      }
-    },
-  });
+  // `scope` is only set when ArmorIQ is enabled. Everything below that uses
+  // it is guarded by `if (scope)`.
+  let scope: ArmorIQADKBundle | undefined;
 
-  scope?.install(agent);
+  if (armoriq) {
+    // `forUser` binds this run to one person, so policy is applied per user.
+    scope = await armoriq.forUser(userEmail, {
+      goal: question,
+      // Optional. ArmorIQ calls this as it makes decisions, so an app can show
+      // "waiting for approval" instead of appearing frozen.
+      onEvent: (kind, payload) => {
+        const tool = String(payload.tool ?? '');
+        if (kind === 'hold') {
+          console.log(`HOLD     ${tool} — waiting for a human to approve`);
+          console.log(`         reason: ${payload.reason}`);
+        } else if (kind === 'approved') {
+          console.log(`APPROVED ${tool} — carrying on`);
+        } else if (kind === 'block') {
+          blocked.push(tool);
+          console.log(`BLOCKED  ${tool}`);
+          console.log(`         reason: ${payload.reason}`);
+        } else if (kind === 'timeout' || kind === 'rejected') {
+          blocked.push(tool);
+          console.log(`REFUSED  ${tool} — approval ${kind}`);
+        }
+      },
+    });
 
-  if (!scope) {
+    scope.install(agent);
+  } else {
     console.log('ArmorIQ is NOT installed. Nothing will be checked.\n');
   }
 
@@ -906,15 +1009,19 @@ export async function ask(question: string, userEmail: string): Promise<AskResul
       }
 
       if (isFinalResponse(event)) {
-        const parts = event.content?.parts ?? [];
-        const text = parts.map((p) => p.text ?? '').join('');
+        let text = '';
+        if (event.content?.parts) {
+          text = event.content.parts.map((p) => p.text ?? '').join('');
+        }
         if (text.trim()) answer = text.trim();
       }
     }
   } finally {
     // Always clean up, even if the run failed.
-    scope?.uninstall(agent);
-    await scope?.close();
+    if (scope) {
+      scope.uninstall(agent);
+      await scope.close();
+    }
     await toolset.close();
   }
 
